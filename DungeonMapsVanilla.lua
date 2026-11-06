@@ -3215,3 +3215,73 @@ end
 if DMV_CommandList then
 	table.insert(DMV_CommandList, { cmd = "/dmv fade", desc = "Toggle map fade while moving (/dmv fade 0.4 sets opacity)" })
 end
+
+-- Synthetic map clicks
+-- The map frames are mouse-transparent, so the engine never sends them clicks.
+-- Watch the mouse buttons directly: a quick, non-dragging single-button click
+-- over the map canvas (nothing else under the cursor) triggers the normal map
+-- handler. The click still reaches the world too.
+
+local DMV_CLICK_MAX_TIME = 0.3   -- seconds held to count as a click
+local DMV_CLICK_MAX_MOVE = 6     -- pixels moved before it counts as a drag
+
+local clickState = {}
+
+local function DMV_CursorOverMapCanvas()
+	if not WorldMapFrame or not WorldMapFrame:IsShown() then return false end
+	local focus = GetMouseFocus and GetMouseFocus()
+	if focus and focus ~= WorldFrame then return false end   -- over other UI
+	local area = WorldMapFrameScrollFrame or WorldMapButton
+	return (area and MouseIsOver(area)) and true or false
+end
+
+local function DMV_FireMapClick(button)
+	-- Dungeon overlay up: use DMV's own handler (right = back / zoom out).
+	if DMV_ClickFrame and DMV_ClickFrame:IsShown() then
+		local fn = DMV_ClickFrame:GetScript("OnMouseDown")
+		if fn then fn(DMV_ClickFrame, button) end
+		return
+	end
+	-- Normal world map: left = zoom into zone, right = zoom out.
+	if not WorldMapButton then return end
+	local fn = WorldMapButton:GetScript("OnClick")
+	if not fn then return end
+	local oldThis, oldArg1 = this, arg1
+	this, arg1 = WorldMapButton, button
+	fn(WorldMapButton, button)
+	this, arg1 = oldThis, oldArg1
+end
+
+local mapClickFrame = CreateFrame("Frame", "DMV_MapClickFrame")
+mapClickFrame:SetScript("OnUpdate", function()
+	local now = GetTime()
+	local isL = IsMouseButtonDown("LeftButton") and true or false
+	local isR = IsMouseButtonDown("RightButton") and true or false
+	local buttons = { LeftButton = isL, RightButton = isR }
+
+	for button, isDown in pairs(buttons) do
+		local otherDown = (button == "LeftButton") and isR or isL
+		local st = clickState[button]
+
+		if isDown and not st then
+			local cx, cy = GetCursorPosition()
+			clickState[button] = {
+				t = now, x = cx, y = cy,
+				valid = (not otherDown) and DMV_CursorOverMapCanvas(),
+			}
+		elseif isDown and st then
+			-- Other button joined (mouse-walk / both-button turn): not a click.
+			if otherDown then st.valid = false end
+		elseif (not isDown) and st then
+			clickState[button] = nil
+			if st.valid and (now - st.t) <= DMV_CLICK_MAX_TIME then
+				local cx, cy = GetCursorPosition()
+				local dx, dy = cx - st.x, cy - st.y
+				if (dx * dx + dy * dy) <= (DMV_CLICK_MAX_MOVE * DMV_CLICK_MAX_MOVE)
+				   and DMV_CursorOverMapCanvas() then
+					DMV_FireMapClick(button)
+				end
+			end
+		end
+	end
+end)
