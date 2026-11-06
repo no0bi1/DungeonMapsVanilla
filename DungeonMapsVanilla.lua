@@ -3038,9 +3038,10 @@ SlashCmdList["DMV"] = function(msg)
 	end
 end
 
--- Map fade / click-through / click zoom while inside a dungeon or raid
--- Port of the standalone WorldMap addon, which disables itself in party/raid
--- instances. Only active there, so the two never run at the same time.
+-- Map fade / click-through / click zoom
+-- Port of the standalone WorldMap addon's behaviour, applied everywhere.
+-- Do not run both: disable the standalone WorldMap addon, or clicks get
+-- processed twice.
 
 local DMV_FADE_DEFAULT_ALPHA = 0.35
 local DMV_FADE_SPEED         = 3.0    -- alpha units per second
@@ -3050,11 +3051,6 @@ local DMV_MOVE_HOLD          = 0.3
 local DMV_CLICK_MAX_TIME     = 0.25
 
 DMV_BothButtonsHeld = false
-
-local function DMV_InDungeon()
-	local _, instanceType = GetInstanceInfo()
-	return instanceType == "party" or instanceType == "raid"
-end
 
 -- Click-through: the map canvas never takes the mouse, so clicks and the
 -- wheel go to WorldFrame / the camera. Dropdowns, pins and blips stay live.
@@ -3108,8 +3104,7 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 		DMV_BothButtonsHeld = false
 	end
 
-	local owns = WorldMapFrame:IsShown() and DMV_InDungeon()
-	if not owns then
+	if not WorldMapFrame:IsShown() then
 		if fadeOwned then
 			WorldMapFrame:SetAlpha(1)
 			DMV_RestoreMouse()
@@ -3157,7 +3152,7 @@ end)
 local origShowCT = DMV_ShowFrames
 DMV_ShowFrames = function(...)
 	origShowCT(...)
-	if DMV_InDungeon() then DMV_ApplyClickThrough() end
+	DMV_ApplyClickThrough()
 end
 
 -- Clicks arrive on WorldFrame (the map no longer takes them).
@@ -3170,13 +3165,14 @@ local function DMV_OtherButton(button)
 end
 
 local function DMV_FireMapClick(button)
-	-- Dungeon overlay up: DMV's own handler (right = back / zoom out).
+	-- Dungeon overlay / instance preview up: DMV's own handler
+	-- (right = back / zoom out).
 	if DMV_ClickFrame and DMV_ClickFrame:IsShown() then
 		local fn = DMV_ClickFrame:GetScript("OnMouseDown")
 		if fn then fn(DMV_ClickFrame, button) end
 		return
 	end
-	-- Real world/continent map shown from inside the instance.
+	-- Normal world / continent / zone map.
 	if button == "LeftButton" then
 		local x, y = GetCursorPosition()
 		local scale = WorldMapButton:GetEffectiveScale()
@@ -3193,7 +3189,6 @@ end
 dmvDown = function(self, button)
 	button = button or arg1
 	if prevDown then prevDown(self, button) end
-	if not DMV_InDungeon() then return end
 	downTime[button] = GetTime()
 	if IsMouseButtonDown(DMV_OtherButton(button)) then bothSeen = true end
 end
@@ -3201,7 +3196,6 @@ end
 dmvUp = function(self, button)
 	button = button or arg1
 	if prevUp then prevUp(self, button) end
-	if not DMV_InDungeon() then return end
 
 	local other = DMV_OtherButton(button)
 	local t = downTime[button]
@@ -3217,17 +3211,15 @@ dmvUp = function(self, button)
 	DMV_FireMapClick(button)
 end
 
--- The standalone WorldMap addon restores WorldFrame's scripts when it
--- disables itself on entering an instance, which would wipe our hook, so
--- re-check from the tick instead of installing once.
+-- Install on WorldFrame, chaining whatever script was there. Re-checked on a
+-- slow tick in case another addon replaces the scripts later.
 local hookFrame = CreateFrame("Frame", "DMV_WorldHookFrame")
-local hookTimer = 0
+local hookTimer = 0.5
 hookFrame:SetScript("OnUpdate", function(self, elapsed)
 	elapsed = tonumber(elapsed) or tonumber(arg1) or 0
 	hookTimer = hookTimer + elapsed
 	if hookTimer < 0.5 then return end
 	hookTimer = 0
-	if not DMV_InDungeon() then return end
 	local d = WorldFrame:GetScript("OnMouseDown")
 	if d ~= dmvDown then
 		prevDown = d
