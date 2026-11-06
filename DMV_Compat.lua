@@ -68,15 +68,20 @@ local function DMV_ApplyWindowFallback()
 		WorldMapFrame:SetMovable(true)
 		WorldMapFrame:EnableMouse(true)
 
-		local oldOnMouseDown = WorldMapFrame:GetScript("OnMouseDown")
-		WorldMapFrame:SetScript("OnMouseDown", function()
+		-- Use a dedicated top strip as the drag target, leaving the map canvas
+		-- and its controls free to receive their normal mouse input.
+		local dragHandle = CreateFrame("Frame", "DMV_MapDragHandle", WorldMapFrame)
+		dragHandle:SetHeight(45)
+		dragHandle:SetPoint("TOPLEFT", WorldMapFrame, "TOPLEFT", 0, 0)
+		dragHandle:SetPoint("TOPRIGHT", WorldMapFrame, "TOPRIGHT", 0, 0)
+		dragHandle:SetFrameLevel(WorldMapFrame:GetFrameLevel() + 1)
+		dragHandle:EnableMouse(true)
+		dragHandle:RegisterForDrag("LeftButton")
+		dragHandle:SetScript("OnDragStart", function()
 			WorldMapFrame:StartMoving()
-			if oldOnMouseDown then oldOnMouseDown() end
 		end)
-		local oldOnMouseUp = WorldMapFrame:GetScript("OnMouseUp")
-		WorldMapFrame:SetScript("OnMouseUp", function()
+		dragHandle:SetScript("OnDragStop", function()
 			WorldMapFrame:StopMovingOrSizing()
-			if oldOnMouseUp then oldOnMouseUp() end
 		end)
 	end
 
