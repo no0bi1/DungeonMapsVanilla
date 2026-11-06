@@ -3073,22 +3073,46 @@ local function DMV_RestoreMouse()
 	end
 end
 
--- While the dungeon overlay is up and the map is faded, the continent map
--- underneath would show through the translucent overlay. Hide it then.
+-- While the dungeon overlay is up, the continent map underneath must be both
+-- invisible and inert (tiles, zone overlays, POIs, party/raid blips, hover
+-- highlight, zone-name label).
 local baseHidden = false
 local function DMV_SetBaseMapHidden(hide)
 	baseHidden = hide
 	local alpha = hide and 0 or 1
+
 	for i = 1, 12 do
 		local t = getglobal("WorldMapDetailTile" .. i)
 		if t then t:SetAlpha(alpha) end
 	end
+
 	for i = 1, 40 do
 		local o = getglobal("WorldMapOverlay" .. i)
 		if o then o:SetAlpha(alpha) end
+
 		local p = getglobal("WorldMapFramePOI" .. i)
-		if p then p:SetAlpha(alpha) end
+		if p then
+			p:SetAlpha(alpha)
+			p:EnableMouse(not hide)
+		end
+
+		local raid = getglobal("WorldMapRaid" .. i)
+		if raid then
+			raid:SetAlpha(alpha)
+			raid:EnableMouse(not hide)
+		end
 	end
+
+	for i = 1, 4 do
+		local party = getglobal("WorldMapParty" .. i)
+		if party then
+			party:SetAlpha(alpha)
+			party:EnableMouse(not hide)
+		end
+	end
+
+	if WorldMapHighlight then WorldMapHighlight:SetAlpha(alpha) end
+	if WorldMapFrameAreaFrame then WorldMapFrameAreaFrame:SetAlpha(alpha) end
 end
 
 
@@ -3169,11 +3193,11 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	end
 	if a ~= cur then WorldMapFrame:SetAlpha(a) end
 
-	-- Hide the continent layers underneath the dungeon overlay while faded.
+	-- Continent layer: invisible and inert whenever the overlay is up.
 	-- Re-applied on each tick while hidden, since Blizzard creates overlay
-	-- textures lazily.
+	-- textures and POI buttons lazily.
 	local overlayUp = DMV_ClickFrame and DMV_ClickFrame:IsShown()
-	local want = (overlayUp and a < 1) and true or false
+	local want = overlayUp and true or false
 	if want ~= baseHidden or (want and ticked) then
 		DMV_SetBaseMapHidden(want)
 	end
