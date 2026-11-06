@@ -3038,50 +3038,51 @@ SlashCmdList["DMV"] = function(msg)
 	end
 end
 
--- Map fade / click-through while moving
--- While the player is moving and the map is open, the map fades and stops
--- intercepting the mouse (clicks and wheel fall through to the game world).
--- No fade while on a taxi. Right-click zoom-out is ignored while both mouse
--- buttons are held (mouse-walk).
+-- Map fade + permanent click-through
+-- While the map is open, the map canvas never intercepts the mouse (clicks and
+-- wheel fall through to the game world). It fades while the player moves, but
+-- not on a taxi. Right-click zoom-out is ignored while both mouse buttons are
+-- held (mouse-walk).
 
 local DMV_FADE_DEFAULT_ALPHA = 0.35
 local DMV_FADE_SPEED         = 3.0    -- alpha units per second
 local DMV_MOVE_EPSILON       = 0.05   -- yards moved per tick to count as moving
 local DMV_MOVE_INTERVAL      = 0.1
 local DMV_MOVE_HOLD          = 0.3    -- stay faded this long after last movement
+local DMV_CLICKTHRU_MARKERS  = false  -- true: pins/blips/arrow are click-through too
 
 DMV_BothButtonsHeld = false
 
 local fadeLastX, fadeLastY
 local fadeLastMove  = 0
-local fadeTickTimer = 0
-local fadeThrough   = false   -- true while mouse is disabled on the map
+local fadeTickTimer = DMV_MOVE_INTERVAL
 
 local function DMV_MouseWalkActive()
 	return DMV_BothButtonsHeld
 		or (IsMouseButtonDown("LeftButton") and IsMouseButtonDown("RightButton"))
 end
 
-local function DMV_SetMapMouse(enabled)
-	if WorldMapFrame then WorldMapFrame:EnableMouse(enabled) end
-	if WorldMapButton then WorldMapButton:EnableMouse(enabled) end
-	if WorldMapFrameScrollFrame then WorldMapFrameScrollFrame:EnableMouse(enabled) end
-	if DMV_ClickFrame then DMV_ClickFrame:EnableMouse(enabled) end
-	if DMV_PlayerArrow then DMV_PlayerArrow:EnableMouse(enabled) end
-	if DMV_PartyBlips then
-		for _, blip in pairs(DMV_PartyBlips) do blip:EnableMouse(enabled) end
+local function DMV_ApplyClickThrough()
+	local frames = { WorldMapFrame, WorldMapButton, WorldMapFrameScrollFrame, DMV_ClickFrame }
+	for i = 1, 4 do
+		local f = frames[i]
+		if f then
+			f:EnableMouse(false)
+			f:EnableMouseWheel(false)
+		end
 	end
-	local i = 1
-	while true do
-		local pin = getglobal("DMV_BossPin" .. i)
-		if not pin then break end
-		pin:EnableMouse(enabled)
-		i = i + 1
-	end
-	-- Some client/UI combinations use a window-level wheel handler. Only
-	-- toggle it when that optional compatibility helper is present.
-	if WorldMapFrame and DMV_NeedsWindowFallback and DMV_NeedsWindowFallback() then
-		WorldMapFrame:EnableMouseWheel(enabled)
+	if DMV_CLICKTHRU_MARKERS then
+		if DMV_PlayerArrow then DMV_PlayerArrow:EnableMouse(false) end
+		if DMV_PartyBlips then
+			for _, blip in pairs(DMV_PartyBlips) do blip:EnableMouse(false) end
+		end
+		local i = 1
+		while true do
+			local pin = getglobal("DMV_BossPin" .. i)
+			if not pin then break end
+			pin:EnableMouse(false)
+			i = i + 1
+		end
 	end
 end
 
@@ -3101,7 +3102,7 @@ local fadeFrame = CreateFrame("Frame", "DMV_MapFadeFrame")
 fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	elapsed = tonumber(elapsed) or tonumber(arg1) or 0
 
-	-- Track both mouse buttons every frame so a later single-button release
+	-- Track "both buttons held" every frame so a later single-button release
 	-- is still recognised as part of mouse-walk.
 	local l = IsMouseButtonDown("LeftButton")
 	local r = IsMouseButtonDown("RightButton")
@@ -3112,14 +3113,11 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	end
 
 	if not WorldMapFrame or not WorldMapFrame:IsShown() then
-		-- Map closed: restore everything so the next open is solid.
-		if fadeThrough or (WorldMapFrame and WorldMapFrame:GetAlpha() ~= 1) then
-			if WorldMapFrame then WorldMapFrame:SetAlpha(1) end
-			DMV_SetMapMouse(true)
-			fadeThrough = false
+		if WorldMapFrame and WorldMapFrame:GetAlpha() ~= 1 then
+			WorldMapFrame:SetAlpha(1)
 		end
 		fadeLastX, fadeLastY = nil, nil
-		fadeLastMove = 0
+		fadeTickTimer = DMV_MOVE_INTERVAL   -- tick immediately on next open
 		return
 	end
 
@@ -3131,36 +3129,33 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	fadeTickTimer = fadeTickTimer + elapsed
 	if fadeTickTimer >= DMV_MOVE_INTERVAL then
 		fadeTickTimer = 0
+		-- Re-assert: other code (e.g. Magnify compat on WORLD_MAP_UPDATE)
+		-- re-enables mouse on some of these frames.
+		DMV_ApplyClickThrough()
 		if not enabled or onTaxi then
 			fadeLastX, fadeLastY = nil, nil
 			fadeLastMove = 0
 		elseif DMV_PlayerMoved() then
 			fadeLastMove = GetTime()
 		end
-		-- Re-assert click-through; other code may re-enable mouse on
-		-- WORLD_MAP_UPDATE.
-		if fadeThrough then DMV_SetMapMouse(false) end
 	end
 
 	local moving = enabled and not onTaxi and (GetTime() - fadeLastMove) < DMV_MOVE_HOLD
 	local target = moving and fadeAlpha or 1
 
-	local a = WorldMapFrame:GetAlpha()
+	local cur = WorldMapFrame:GetAlpha()
+	local a = cur
 	local step = DMV_FADE_SPEED * elapsed
 	if a > target then
 		a = math.max(target, a - step)
 	elseif a < target then
 		a = math.min(target, a + step)
 	end
-	if a ~= WorldMapFrame:GetAlpha() then WorldMapFrame:SetAlpha(a) end
-
-	if moving ~= fadeThrough then
-		fadeThrough = moving
-		DMV_SetMapMouse(not moving)
-	end
+	if a ~= cur then WorldMapFrame:SetAlpha(a) end
 end)
 
--- Don't zoom the map out while mouse-walking.
+-- Don't zoom the map out while mouse-walking (the zoom-out button and any
+-- other caller of these handlers).
 local origMapButtonClick = WorldMapButton_OnClick
 if origMapButtonClick then
 	WorldMapButton_OnClick = function(a, b, c)
@@ -3177,8 +3172,8 @@ if origZoomOutClick then
 	end
 end
 
--- Same guard for DMV's own right-click handler (DMV_ClickFrame is created
--- lazily, so wrap it from DMV_ShowFrames).
+-- DMV_ClickFrame is created lazily: guard its right-click handler and make
+-- it click-through as soon as it exists.
 local origShowForGuard = DMV_ShowFrames
 DMV_ShowFrames = function(...)
 	origShowForGuard(...)
@@ -3193,9 +3188,10 @@ DMV_ShowFrames = function(...)
 			end)
 		end
 	end
+	DMV_ApplyClickThrough()
 end
 
--- /dmv fade          toggle
+-- /dmv fade          toggle fade
 -- /dmv fade 0.4      set faded opacity (0.1 - 1.0) and enable
 local origSlash = SlashCmdList["DMV"]
 SlashCmdList["DMV"] = function(msg)
