@@ -3073,6 +3073,25 @@ local function DMV_RestoreMouse()
 	end
 end
 
+-- While the dungeon overlay is up and the map is faded, the continent map
+-- underneath would show through the translucent overlay. Hide it then.
+local baseHidden = false
+local function DMV_SetBaseMapHidden(hide)
+	baseHidden = hide
+	local alpha = hide and 0 or 1
+	for i = 1, 12 do
+		local t = getglobal("WorldMapDetailTile" .. i)
+		if t then t:SetAlpha(alpha) end
+	end
+	for i = 1, 40 do
+		local o = getglobal("WorldMapOverlay" .. i)
+		if o then o:SetAlpha(alpha) end
+		local p = getglobal("WorldMapFramePOI" .. i)
+		if p then p:SetAlpha(alpha) end
+	end
+end
+
+
 -- Fade
 local fadeLastX, fadeLastY
 local fadeLastMove  = 0
@@ -3107,6 +3126,7 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	if not WorldMapFrame:IsShown() then
 		if fadeOwned then
 			WorldMapFrame:SetAlpha(1)
+			DMV_SetBaseMapHidden(false)
 			DMV_RestoreMouse()
 			fadeOwned = false
 		end
@@ -3121,9 +3141,11 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	local onTaxi = UnitOnTaxi and UnitOnTaxi("player")
 	local fadeAlpha = (st and st.mapFadeAlpha) or DMV_FADE_DEFAULT_ALPHA
 
+	local ticked = false
 	fadeTickTimer = fadeTickTimer + elapsed
 	if fadeTickTimer >= DMV_MOVE_INTERVAL then
 		fadeTickTimer = 0
+		ticked = true
 		-- Re-assert: Magnify compat re-enables mouse on WORLD_MAP_UPDATE.
 		DMV_ApplyClickThrough()
 		if not enabled or onTaxi then
@@ -3146,6 +3168,15 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 		a = math.min(target, a + step)
 	end
 	if a ~= cur then WorldMapFrame:SetAlpha(a) end
+
+	-- Hide the continent layers underneath the dungeon overlay while faded.
+	-- Re-applied on each tick while hidden, since Blizzard creates overlay
+	-- textures lazily.
+	local overlayUp = DMV_ClickFrame and DMV_ClickFrame:IsShown()
+	local want = (overlayUp and a < 1) and true or false
+	if want ~= baseHidden or (want and ticked) then
+		DMV_SetBaseMapHidden(want)
+	end
 end)
 
 -- Apply click-through the moment DMV's lazily created click frame appears.
