@@ -3038,30 +3038,26 @@ SlashCmdList["DMV"] = function(msg)
 	end
 end
 
--- Map fade + permanent click-through
--- While the map is open, the map canvas never intercepts the mouse (clicks and
--- wheel fall through to the game world). It fades while the player moves, but
--- not on a taxi. Right-click zoom-out is ignored while both mouse buttons are
--- held (mouse-walk).
+-- Map fade / click-through / click zoom while inside a dungeon or raid
+-- Port of the standalone WorldMap addon, which disables itself in party/raid
+-- instances. Only active there, so the two never run at the same time.
 
 local DMV_FADE_DEFAULT_ALPHA = 0.35
 local DMV_FADE_SPEED         = 3.0    -- alpha units per second
-local DMV_MOVE_EPSILON       = 0.05   -- yards moved per tick to count as moving
+local DMV_MOVE_EPSILON       = 0.05   -- yards per tick that count as moving
 local DMV_MOVE_INTERVAL      = 0.1
-local DMV_MOVE_HOLD          = 0.3    -- stay faded this long after last movement
-local DMV_CLICKTHRU_MARKERS  = false  -- true: pins/blips/arrow are click-through too
+local DMV_MOVE_HOLD          = 0.3
+local DMV_CLICK_MAX_TIME     = 0.25
 
 DMV_BothButtonsHeld = false
 
-local fadeLastX, fadeLastY
-local fadeLastMove  = 0
-local fadeTickTimer = DMV_MOVE_INTERVAL
-
-local function DMV_MouseWalkActive()
-	return DMV_BothButtonsHeld
-		or (IsMouseButtonDown("LeftButton") and IsMouseButtonDown("RightButton"))
+local function DMV_InDungeon()
+	local _, instanceType = GetInstanceInfo()
+	return instanceType == "party" or instanceType == "raid"
 end
 
+-- Click-through: the map canvas never takes the mouse, so clicks and the
+-- wheel go to WorldFrame / the camera. Dropdowns, pins and blips stay live.
 local function DMV_ApplyClickThrough()
 	local frames = { WorldMapFrame, WorldMapButton, WorldMapFrameScrollFrame, DMV_ClickFrame }
 	for i = 1, 4 do
@@ -3071,20 +3067,21 @@ local function DMV_ApplyClickThrough()
 			f:EnableMouseWheel(false)
 		end
 	end
-	if DMV_CLICKTHRU_MARKERS then
-		if DMV_PlayerArrow then DMV_PlayerArrow:EnableMouse(false) end
-		if DMV_PartyBlips then
-			for _, blip in pairs(DMV_PartyBlips) do blip:EnableMouse(false) end
-		end
-		local i = 1
-		while true do
-			local pin = getglobal("DMV_BossPin" .. i)
-			if not pin then break end
-			pin:EnableMouse(false)
-			i = i + 1
-		end
+end
+
+local function DMV_RestoreMouse()
+	if DMV_ClickFrame then DMV_ClickFrame:EnableMouse(true) end
+	if WorldMapFrameScrollFrame then
+		WorldMapFrameScrollFrame:EnableMouse(true)
+		WorldMapFrameScrollFrame:EnableMouseWheel(true)
 	end
 end
+
+-- Fade
+local fadeLastX, fadeLastY
+local fadeLastMove  = 0
+local fadeTickTimer = DMV_MOVE_INTERVAL
+local fadeOwned     = false
 
 local function DMV_PlayerMoved()
 	local posY, posX = UnitPosition("player")
@@ -3102,8 +3099,7 @@ local fadeFrame = CreateFrame("Frame", "DMV_MapFadeFrame")
 fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	elapsed = tonumber(elapsed) or tonumber(arg1) or 0
 
-	-- Track "both buttons held" every frame so a later single-button release
-	-- is still recognised as part of mouse-walk.
+	-- "Both buttons held" tracked every frame.
 	local l = IsMouseButtonDown("LeftButton")
 	local r = IsMouseButtonDown("RightButton")
 	if l and r then
@@ -3112,14 +3108,18 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 		DMV_BothButtonsHeld = false
 	end
 
-	if not WorldMapFrame or not WorldMapFrame:IsShown() then
-		if WorldMapFrame and WorldMapFrame:GetAlpha() ~= 1 then
+	local owns = WorldMapFrame:IsShown() and DMV_InDungeon()
+	if not owns then
+		if fadeOwned then
 			WorldMapFrame:SetAlpha(1)
+			DMV_RestoreMouse()
+			fadeOwned = false
 		end
 		fadeLastX, fadeLastY = nil, nil
-		fadeTickTimer = DMV_MOVE_INTERVAL   -- tick immediately on next open
+		fadeTickTimer = DMV_MOVE_INTERVAL   -- act immediately on next open
 		return
 	end
+	fadeOwned = true
 
 	local st = DMV_Settings
 	local enabled = not (st and st.mapFade == false)
@@ -3129,8 +3129,7 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	fadeTickTimer = fadeTickTimer + elapsed
 	if fadeTickTimer >= DMV_MOVE_INTERVAL then
 		fadeTickTimer = 0
-		-- Re-assert: other code (e.g. Magnify compat on WORLD_MAP_UPDATE)
-		-- re-enables mouse on some of these frames.
+		-- Re-assert: Magnify compat re-enables mouse on WORLD_MAP_UPDATE.
 		DMV_ApplyClickThrough()
 		if not enabled or onTaxi then
 			fadeLastX, fadeLastY = nil, nil
@@ -3154,42 +3153,92 @@ fadeFrame:SetScript("OnUpdate", function(self, elapsed)
 	if a ~= cur then WorldMapFrame:SetAlpha(a) end
 end)
 
--- Don't zoom the map out while mouse-walking (the zoom-out button and any
--- other caller of these handlers).
-local origMapButtonClick = WorldMapButton_OnClick
-if origMapButtonClick then
-	WorldMapButton_OnClick = function(a, b, c)
-		if DMV_MouseWalkActive() then return end
-		return origMapButtonClick(a, b, c)
-	end
-end
-
-local origZoomOutClick = WorldMapZoomOutButton_OnClick
-if origZoomOutClick then
-	WorldMapZoomOutButton_OnClick = function(a, b, c)
-		if DMV_MouseWalkActive() then return end
-		return origZoomOutClick(a, b, c)
-	end
-end
-
--- DMV_ClickFrame is created lazily: guard its right-click handler and make
--- it click-through as soon as it exists.
-local origShowForGuard = DMV_ShowFrames
+-- Apply click-through the moment DMV's lazily created click frame appears.
+local origShowCT = DMV_ShowFrames
 DMV_ShowFrames = function(...)
-	origShowForGuard(...)
-	if DMV_ClickFrame and not DMV_ClickFrame._mwGuard then
-		local orig = DMV_ClickFrame:GetScript("OnMouseDown")
-		if orig then
-			DMV_ClickFrame._mwGuard = true
-			DMV_ClickFrame:SetScript("OnMouseDown", function(self, button)
-				button = button or arg1
-				if button == "RightButton" and DMV_MouseWalkActive() then return end
-				return orig(self, button)
-			end)
-		end
-	end
-	DMV_ApplyClickThrough()
+	origShowCT(...)
+	if DMV_InDungeon() then DMV_ApplyClickThrough() end
 end
+
+-- Clicks arrive on WorldFrame (the map no longer takes them).
+local downTime = {}
+local bothSeen = false
+local prevDown, prevUp, dmvDown, dmvUp
+
+local function DMV_OtherButton(button)
+	return (button == "LeftButton") and "RightButton" or "LeftButton"
+end
+
+local function DMV_FireMapClick(button)
+	-- Dungeon overlay up: DMV's own handler (right = back / zoom out).
+	if DMV_ClickFrame and DMV_ClickFrame:IsShown() then
+		local fn = DMV_ClickFrame:GetScript("OnMouseDown")
+		if fn then fn(DMV_ClickFrame, button) end
+		return
+	end
+	-- Real world/continent map shown from inside the instance.
+	if button == "LeftButton" then
+		local x, y = GetCursorPosition()
+		local scale = WorldMapButton:GetEffectiveScale()
+		ProcessMapClick(
+			(x / scale - WorldMapButton:GetLeft()) / WorldMapButton:GetWidth(),
+			(WorldMapButton:GetTop() - y / scale) / WorldMapButton:GetHeight()
+		)
+	elseif button == "RightButton"
+	   and (GetCurrentMapZone() > 0 or GetCurrentMapContinent() > 0) then
+		WorldMapZoomOutButton_OnClick()
+	end
+end
+
+dmvDown = function(self, button)
+	button = button or arg1
+	if prevDown then prevDown(self, button) end
+	if not DMV_InDungeon() then return end
+	downTime[button] = GetTime()
+	if IsMouseButtonDown(DMV_OtherButton(button)) then bothSeen = true end
+end
+
+dmvUp = function(self, button)
+	button = button or arg1
+	if prevUp then prevUp(self, button) end
+	if not DMV_InDungeon() then return end
+
+	local other = DMV_OtherButton(button)
+	local t = downTime[button]
+	downTime[button] = nil
+
+	-- Mouse-walk (both buttons) must never count as a map click.
+	local tainted = bothSeen or DMV_BothButtonsHeld or IsMouseButtonDown(other)
+	if not IsMouseButtonDown(other) and not downTime[other] then bothSeen = false end
+
+	if tainted or not t or (GetTime() - t) > DMV_CLICK_MAX_TIME then return end
+	if not WorldMapFrame:IsVisible() or not MouseIsOver(WorldMapButton) then return end
+
+	DMV_FireMapClick(button)
+end
+
+-- The standalone WorldMap addon restores WorldFrame's scripts when it
+-- disables itself on entering an instance, which would wipe our hook, so
+-- re-check from the tick instead of installing once.
+local hookFrame = CreateFrame("Frame", "DMV_WorldHookFrame")
+local hookTimer = 0
+hookFrame:SetScript("OnUpdate", function(self, elapsed)
+	elapsed = tonumber(elapsed) or tonumber(arg1) or 0
+	hookTimer = hookTimer + elapsed
+	if hookTimer < 0.5 then return end
+	hookTimer = 0
+	if not DMV_InDungeon() then return end
+	local d = WorldFrame:GetScript("OnMouseDown")
+	if d ~= dmvDown then
+		prevDown = d
+		WorldFrame:SetScript("OnMouseDown", dmvDown)
+	end
+	local u = WorldFrame:GetScript("OnMouseUp")
+	if u ~= dmvUp then
+		prevUp = u
+		WorldFrame:SetScript("OnMouseUp", dmvUp)
+	end
+end)
 
 -- /dmv fade          toggle fade
 -- /dmv fade 0.4      set faded opacity (0.1 - 1.0) and enable
@@ -3215,73 +3264,3 @@ end
 if DMV_CommandList then
 	table.insert(DMV_CommandList, { cmd = "/dmv fade", desc = "Toggle map fade while moving (/dmv fade 0.4 sets opacity)" })
 end
-
--- Synthetic map clicks
--- The map frames are mouse-transparent, so the engine never sends them clicks.
--- Watch the mouse buttons directly: a quick, non-dragging single-button click
--- over the map canvas (nothing else under the cursor) triggers the normal map
--- handler. The click still reaches the world too.
-
-local DMV_CLICK_MAX_TIME = 0.3   -- seconds held to count as a click
-local DMV_CLICK_MAX_MOVE = 6     -- pixels moved before it counts as a drag
-
-local clickState = {}
-
-local function DMV_CursorOverMapCanvas()
-	if not WorldMapFrame or not WorldMapFrame:IsShown() then return false end
-	local focus = GetMouseFocus and GetMouseFocus()
-	if focus and focus ~= WorldFrame then return false end   -- over other UI
-	local area = WorldMapFrameScrollFrame or WorldMapButton
-	return (area and MouseIsOver(area)) and true or false
-end
-
-local function DMV_FireMapClick(button)
-	-- Dungeon overlay up: use DMV's own handler (right = back / zoom out).
-	if DMV_ClickFrame and DMV_ClickFrame:IsShown() then
-		local fn = DMV_ClickFrame:GetScript("OnMouseDown")
-		if fn then fn(DMV_ClickFrame, button) end
-		return
-	end
-	-- Normal world map: left = zoom into zone, right = zoom out.
-	if not WorldMapButton then return end
-	local fn = WorldMapButton:GetScript("OnClick")
-	if not fn then return end
-	local oldThis, oldArg1 = this, arg1
-	this, arg1 = WorldMapButton, button
-	fn(WorldMapButton, button)
-	this, arg1 = oldThis, oldArg1
-end
-
-local mapClickFrame = CreateFrame("Frame", "DMV_MapClickFrame")
-mapClickFrame:SetScript("OnUpdate", function()
-	local now = GetTime()
-	local isL = IsMouseButtonDown("LeftButton") and true or false
-	local isR = IsMouseButtonDown("RightButton") and true or false
-	local buttons = { LeftButton = isL, RightButton = isR }
-
-	for button, isDown in pairs(buttons) do
-		local otherDown = (button == "LeftButton") and isR or isL
-		local st = clickState[button]
-
-		if isDown and not st then
-			local cx, cy = GetCursorPosition()
-			clickState[button] = {
-				t = now, x = cx, y = cy,
-				valid = (not otherDown) and DMV_CursorOverMapCanvas(),
-			}
-		elseif isDown and st then
-			-- Other button joined (mouse-walk / both-button turn): not a click.
-			if otherDown then st.valid = false end
-		elseif (not isDown) and st then
-			clickState[button] = nil
-			if st.valid and (now - st.t) <= DMV_CLICK_MAX_TIME then
-				local cx, cy = GetCursorPosition()
-				local dx, dy = cx - st.x, cy - st.y
-				if (dx * dx + dy * dy) <= (DMV_CLICK_MAX_MOVE * DMV_CLICK_MAX_MOVE)
-				   and DMV_CursorOverMapCanvas() then
-					DMV_FireMapClick(button)
-				end
-			end
-		end
-	end
-end)
